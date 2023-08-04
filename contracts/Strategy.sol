@@ -6,8 +6,13 @@ import {BaseTokenizedStrategy} from "@tokenized-strategy/BaseTokenizedStrategy.s
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-// Import interfaces for many popular DeFi projects, or add your own!
-//import "../interfaces/<protocol>/<Interface>.sol";
+import {IUniswapV3Pool} from "@uniswap/interfaces/IUniswapV3Pool.sol";
+
+import {UniswapHelperViews} from "./libraries/UniswapHelperViews.sol";
+// Liquidity calculations
+import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
+// Pool tick calculations
+import {TickMath} from "./libraries/TickMath.sol";
 
 /**
  * The `TokenizedStrategy` variable can be used to retrieve the strategies
@@ -24,6 +29,12 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 contract Strategy is BaseTokenizedStrategy {
     using SafeERC20 for ERC20;
+
+    address public pool;
+    address public otherPoolToken;
+    int24 public ticksFromCurrent = 0;
+    int24 public minTick;
+    int24 public maxTick;
 
     constructor(
         address _asset,
@@ -46,9 +57,7 @@ contract Strategy is BaseTokenizedStrategy {
      * to deposit in the yield source.
      */
     function _deployFunds(uint256 _amount) internal override {
-        // TODO: implement deposit logice EX:
-        //
-        //      lendingpool.deposit(asset, _amount ,0);
+        createLP();
     }
 
     /**
@@ -232,14 +241,195 @@ contract Strategy is BaseTokenizedStrategy {
      *    }
      *
      * @param _amount The amount of asset to attempt to free.
-     *
-    function _emergencyWithdraw(uint256 _amount) internal override {
-        TODO: If desired implement simple logic to free deployed funds.
-
-        EX:
-            _amount = min(_amount, atoken.balanceOf(address(this)));
-            lendingPool.withdraw(asset, _amount);
+     */
+    function _emergencyWithdraw(uint256 _amount) internal override {  
+        // TODO: Implement
     }
 
-    */
+
+    /*
+     * @notice
+     *  Function used internally to open the LP position in the uni v3 pool:
+     *      - calculates the ticks to provide liquidity into
+     *      - calculates the liquidity amount to provide based on the ticks
+     *      and amounts to invest
+     *      - calls the mint function in the uni v3 pool
+     * @return balance of tokens in the LP (invested amounts)
+     */
+    function createLP() internal returns (uint256, uint256) {
+        IUniswapV3Pool _pool = IUniswapV3Pool(pool);
+        // Get the current state of the pool
+        (uint160 sqrtPriceX96, int24 tick, , , , , ) = _pool.slot0();
+        // Space between ticks for this pool
+        int24 _tickSpacing = _pool.tickSpacing();
+        // Current tick must be referenced as a multiple of tickSpacing
+        int24 _currentTick = (tick / _tickSpacing) * _tickSpacing;
+        // Gas savings for # of ticks to LP
+        int24 _ticksFromCurrent = int24(ticksFromCurrent);
+        // Minimum tick to enter
+        int24 _minTick = _currentTick - (_tickSpacing * _ticksFromCurrent);
+        // Maximum tick to enter
+        int24 _maxTick = _currentTick +
+            (_tickSpacing * (_ticksFromCurrent + 1));
+
+        // Set the state variables
+        minTick = _minTick;
+        maxTick = _maxTick;
+
+        uint256 amount0;
+        uint256 amount1;
+
+        // MAke sure tokens are in order
+        if (asset < otherPoolToken) {
+            amount0 = balanceOfAsset();
+            amount1 = balanceOfOtherPoolToken();
+        } else {
+            amount0 = balanceOfOtherPoolToken();
+            amount1 = balanceOfAsset();
+        }
+
+        // Calculate the amount of liquidity the joint can provided based on current situation
+        // and amount of tokens available
+        uint128 liquidityAmount = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceX96,
+            TickMath.getSqrtRatioAtTick(_minTick),
+            TickMath.getSqrtRatioAtTick(_maxTick),
+            amount0,
+            amount1
+        );
+
+        // Mint the LP position - we are not yet in the LP, needs to go through the mint
+        // callback first
+        _pool.mint(address(this), _minTick, _maxTick, liquidityAmount, "");
+
+        // After executing the mint callback, calculate the invested amounts
+        return balanceOfTokensInLP();
+    }
+
+    /*
+     * @notice
+     *  Function used internally to close the LP position in the uni v3 pool:
+     *      - burns the LP liquidity specified amount
+     *      - collects all pending rewards
+     *      - re-sets the active position min and max tick to 0
+     * @param amount, amount of liquidity to burn
+     */
+    function burnLP(uint256 _amount) internal {
+        _burnAndCollect(_amount, minTick, maxTick);
+        // If entire position is closed, re-set the min and max ticks
+        (uint128 liquidity, , , , ) = _positionInfo();
+        if (liquidity == 0) {
+            minTick = 0;
+            maxTick = 0;
+        }
+    }
+
+    /*
+     * @notice
+     *  Function called by the uniswap pool when minting the LP position (providing liquidity),
+     * instead of approving and sending the tokens, uniV3 calls the callback imoplementation
+     * on the caller contract
+     * @param amount0Owed, amount of token0 to send
+     * @param amount1Owed, amount of token1 to send
+     * @param data, additional calldata
+     */
+    function uniswapV3MintCallback(
+        uint256 amount0Owed,
+        uint256 amount1Owed,
+        bytes calldata data
+    ) external {
+        IUniswapV3Pool _pool = IUniswapV3Pool(pool);
+        // Only the pool can use this function
+        require(msg.sender == address(_pool)); // dev: callback only called by pool
+        // Send the required funds to the pool
+        ERC20(_pool.token0()).safeTransfer(address(_pool), amount0Owed);
+        ERC20(_pool.token1()).safeTransfer(address(_pool), amount1Owed);
+    }
+
+    function balanceOfAsset() public returns (uint256) {
+        return ERC20(asset).balanceOf(address(this));
+    }
+
+    function balanceOfOtherPoolToken() public returns (uint256) {
+        return ERC20(otherPoolToken).balanceOf(address(this));
+    }
+
+    /*
+     * @notice
+     *  Function returning the current balance of each token in the LP position taking
+     * the new level of reserves into account
+     * @return _balanceAsset, balance of tokenAsset in the LP position
+     * @return _balanceOtherToken, balance of tokenOtherToken in the LP position
+     */
+    function balanceOfTokensInLP()
+        public
+        view
+        returns (uint256 _balanceAsset, uint256 _balanceOtherToken)
+    {
+        // Get the current pool status
+        (uint160 sqrtPriceX96, , , , , , ) = IUniswapV3Pool(pool).slot0();
+        // Get the current position status
+        (uint128 liquidity, , , , ) = _positionInfo();
+
+        // Use Uniswap libraries to calculate the token0 and token1 balances for the
+        // provided ticks and liquidity amount
+        (uint256 amount0, uint256 amount1) = LiquidityAmounts
+            .getAmountsForLiquidity(
+                sqrtPriceX96,
+                TickMath.getSqrtRatioAtTick(minTick),
+                TickMath.getSqrtRatioAtTick(maxTick),
+                liquidity
+            );
+        // uniswap orders token0 and token1 based on alphabetical order
+        return asset < otherPoolToken ? (amount0, amount1) : (amount1, amount0);
+    }
+
+    /*
+     * @notice
+     *  Function used internally to retrieve the details of the joint's LP position:
+     * - the amount of liquidity owned by this position
+     * - fee growth per unit of liquidity as of the last update to liquidity or fees owed
+     * - the fees owed to the position owner in token0/token1
+     * @return PositionInfo struct containing the position details
+     */
+    function _positionInfo()
+        private
+        view
+        returns (
+            uint128 liquidity,
+            uint256 feeGrowthInside0LastX128,
+            uint256 feeGrowthInside1LastX128,
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
+        )
+    {
+        bytes32 key = keccak256(
+            abi.encodePacked(address(this), minTick, maxTick)
+        );
+        return IUniswapV3Pool(pool).positions(key);
+    }
+
+    /*
+     * @notice
+     *  Function available internally to burn the LP amount specified, for position
+     * defined by minTick and maxTick specified and collect the owed tokens
+     * @param _amount, amount of liquidity to burn
+     * @param _minTick, lower limit of position
+     * @param _maxTick, upper limit of position
+     */
+    function _burnAndCollect(
+        uint256 _amount,
+        int24 _minTick,
+        int24 _maxTick
+    ) internal {
+        IUniswapV3Pool _pool = IUniswapV3Pool(pool);
+        _pool.burn(_minTick, _maxTick, uint128(_amount));
+        _pool.collect(
+            address(this),
+            _minTick,
+            _maxTick,
+            type(uint128).max,
+            type(uint128).max
+        );
+    }
 }

@@ -6,6 +6,7 @@ plugins:
   - name: hardhat
   - name: infura
   - name: alchemy
+  - name: foundry
 
 default_ecosystem: ethereum
 
@@ -23,12 +24,21 @@ dependencies:
     github: yearn/tokenized-strategy-periphery
     ref: master
     contracts_folder: src
+  - name: periphery
+    github: yearn/tokenized-strategy-periphery
+    ref: master
+    contracts_folder: src
+  - name: v3-core
+    github: 16slim/v3-core
+    ref: 1.0.2-solc-0.8-simulate
 
 solidity:
   import_remapping:
     - "@openzeppelin/contracts=openzeppelin/v4.8.2"
     - "@tokenized-strategy=tokenized-strategy/v3.0.0"
     - "@periphery=periphery/master"
+    - "@uniswap/contracts=v3-core/1.0.2-solc-0.8-simulate"
+    - "@uniswap=v3-core/1.0.2-solc-0.8-simulate"
 
 ethereum:
   default_network: mainnet-fork
