@@ -35,7 +35,9 @@ contract Strategy is BaseTokenizedStrategy {
     int24 public ticksFromCurrent = 0;
     int24 public minTick;
     int24 public maxTick;
-
+    
+    uint256 public epochStartedAt;
+    uint256 public epochDuration;
     constructor(
         address _asset,
         string memory _name
@@ -114,11 +116,36 @@ contract Strategy is BaseTokenizedStrategy {
         override
         returns (uint256 _totalAssets)
     {
-        // TODO: Implement harvesting logic and accurate accounting EX:
-        //
-        //      _claminAndSellRewards();
-        //      _totalAssets = aToken.balanceof(address(this)) + ERC20(asset).balanceOf(address(this));
-        _totalAssets = ERC20(asset).balanceOf(address(this));
+        uint256 _currentEpochStartedAt = epochStartedAt;
+        if(_currentEpochStartedAt == 0) {
+            // There is no running epoch. Start one
+            // NOTE: we save assets just before
+            _totalAssets = ERC20(asset).balanceOf(address(this));
+            // TODO: request hedge (and substract payment from _totalAssets)
+            createLP();
+        } else if (_currentEpochStartedAt + epochDuration <= block.timestamp) {
+            // An epoch is running and it's time to close
+            (uint128 liquidity, , , , ) = _positionInfo();
+            burnLP(liquidity);
+            // TODO: request payout from hedge provider (if any)
+            _totalAssets = ERC20(asset).balanceOf(address(this));
+        } else {
+            IUniswapV3Pool _pool = IUniswapV3Pool(pool);
+            // The Epoch is running. Is it in danger?
+            // Get the current state of the pool
+            (uint160 sqrtPriceX96, int24 tick, , , , , ) = _pool.slot0();
+            // Space between ticks for this pool
+            int24 _tickSpacing = _pool.tickSpacing();
+            // Current tick must be referenced as a multiple of tickSpacing
+            int24 _currentTick = (tick / _tickSpacing) * _tickSpacing;
+            if(_currentTick > maxTick) {
+                // The price crossed our range and we are out of range. Time to close the position
+                (uint128 liquidity, , , , ) = _positionInfo();
+                burnLP(liquidity);
+                // TODO: request payout from hedge provider (if any)
+            }
+            _totalAssets = ERC20(asset).balanceOf(address(this));
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -267,7 +294,8 @@ contract Strategy is BaseTokenizedStrategy {
         // Gas savings for # of ticks to LP
         int24 _ticksFromCurrent = int24(ticksFromCurrent);
         // Minimum tick to enter
-        int24 _minTick = _currentTick - (_tickSpacing * _ticksFromCurrent);
+        // we fix to the tick just above the current tick to ensure we provide single side
+        int24 _minTick = _currentTick + _tickSpacing;
         // Maximum tick to enter
         int24 _maxTick = _currentTick +
             (_tickSpacing * (_ticksFromCurrent + 1));
@@ -279,11 +307,13 @@ contract Strategy is BaseTokenizedStrategy {
         uint256 amount0;
         uint256 amount1;
 
-        // MAke sure tokens are in order
+        // Make sure tokens are in order
         if (asset < otherPoolToken) {
             amount0 = balanceOfAsset();
+            // expected to be 0 in single sided
             amount1 = balanceOfOtherPoolToken();
         } else {
+            // expected to be 0 in single sided
             amount0 = balanceOfOtherPoolToken();
             amount1 = balanceOfAsset();
         }
