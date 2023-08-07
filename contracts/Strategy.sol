@@ -35,13 +35,22 @@ contract Strategy is BaseTokenizedStrategy {
     int24 public ticksFromCurrent = 0;
     int24 public minTick;
     int24 public maxTick;
-    
+
     uint256 public epochStartedAt;
     uint256 public epochDuration;
+
+    address public vault;
+    uint256 public depositLimit;
+
     constructor(
         address _asset,
-        string memory _name
-    ) BaseTokenizedStrategy(_asset, _name) {}
+        string memory _name,
+        address _vault,
+        uint256 _depositLimit
+    ) BaseTokenizedStrategy(_asset, _name) {
+        vault = _vault;
+        depositLimit = _depositLimit;
+    }
 
     /*//////////////////////////////////////////////////////////////
                 NEEDED TO BE OVERRIDEN BY STRATEGIST
@@ -59,7 +68,7 @@ contract Strategy is BaseTokenizedStrategy {
      * to deposit in the yield source.
      */
     function _deployFunds(uint256 _amount) internal override {
-        createLP();
+        // Do nothing since we only deploy funds on reports
     }
 
     /**
@@ -84,9 +93,7 @@ contract Strategy is BaseTokenizedStrategy {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-        // TODO: implement withdraw logic EX:
-        //
-        //      lendingPool.withdraw(asset, _amount);
+        // TODO: allow withdraws only between epochs
     }
 
     /**
@@ -117,35 +124,22 @@ contract Strategy is BaseTokenizedStrategy {
         returns (uint256 _totalAssets)
     {
         uint256 _currentEpochStartedAt = epochStartedAt;
-        if(_currentEpochStartedAt == 0) {
+        if (_currentEpochStartedAt == 0) {
             // There is no running epoch. Start one
             // NOTE: we save assets just before
             _totalAssets = ERC20(asset).balanceOf(address(this));
             // TODO: request hedge (and substract payment from _totalAssets)
             createLP();
-        } else if (_currentEpochStartedAt + epochDuration <= block.timestamp) {
-            // An epoch is running and it's time to close
-            (uint128 liquidity, , , , ) = _positionInfo();
-            burnLP(liquidity);
-            // TODO: request payout from hedge provider (if any)
-            _totalAssets = ERC20(asset).balanceOf(address(this));
-        } else {
-            IUniswapV3Pool _pool = IUniswapV3Pool(pool);
-            // The Epoch is running. Is it in danger?
-            // Get the current state of the pool
-            (uint160 sqrtPriceX96, int24 tick, , , , , ) = _pool.slot0();
-            // Space between ticks for this pool
-            int24 _tickSpacing = _pool.tickSpacing();
-            // Current tick must be referenced as a multiple of tickSpacing
-            int24 _currentTick = (tick / _tickSpacing) * _tickSpacing;
-            if(_currentTick > maxTick) {
-                // The price crossed our range and we are out of range. Time to close the position
-                (uint128 liquidity, , , , ) = _positionInfo();
-                burnLP(liquidity);
-                // TODO: request payout from hedge provider (if any)
-            }
-            _totalAssets = ERC20(asset).balanceOf(address(this));
+            return _totalAssets;
         }
+
+        // require that it's the right time to close the epoch
+        require(_shouldClosePosition(), "epoch-live"); // dev: epoch is running
+
+        // An epoch is running and it's time to close
+        (uint128 liquidity, , , , ) = _positionInfo();
+        burnLP(liquidity);
+        _totalAssets = ERC20(asset).balanceOf(address(this));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -209,16 +203,23 @@ contract Strategy is BaseTokenizedStrategy {
      * @param . The address that is depositing into the strategy.
      * @return . The available amount the `_owner` can deposit in terms of `asset`
      *
+     */
     function availableDepositLimit(
         address _owner
     ) public view override returns (uint256) {
-        TODO: If desired Implement deposit limit logic and any needed state variables .
-        
-        EX:    
-            uint256 totalAssets = TokenizedStrategy.totalAssets();
-            return totalAssets >= depositLimit ? 0 : depositLimit - totalAssets;
+        if (_owner != vault) {
+            return 0;
+        }
+
+        uint256 _depositLimit = depositLimit;
+
+        if (_depositLimit == type(uint256).max) {
+            return type(uint256).max;
+        }
+
+        uint256 _totalAssets = TokenizedStrategy.totalAssets();
+        return _totalAssets >= _depositLimit ? 0 : _depositLimit - _totalAssets;
     }
-    */
 
     /**
      * @notice Gets the max amount of `asset` that can be withdrawn.
@@ -238,15 +239,13 @@ contract Strategy is BaseTokenizedStrategy {
      * @param . The address that is withdrawing from the strategy.
      * @return . The available amount that can be withdrawn in terms of `asset`
      *
+     */
     function availableWithdrawLimit(
         address _owner
     ) public view override returns (uint256) {
-        TODO: If desired Implement withdraw limit logic and any needed state variables.
-        
-        EX:    
-            return TokenizedStrategy.totalIdle();
+        // only allow idle as withdrawable
+        return TokenizedStrategy.totalIdle();
     }
-    */
 
     /**
      * @dev Optional function for a strategist to override that will
@@ -269,10 +268,9 @@ contract Strategy is BaseTokenizedStrategy {
      *
      * @param _amount The amount of asset to attempt to free.
      */
-    function _emergencyWithdraw(uint256 _amount) internal override {  
+    function _emergencyWithdraw(uint256 _amount) internal override {
         // TODO: Implement
     }
-
 
     /*
      * @notice
@@ -295,7 +293,7 @@ contract Strategy is BaseTokenizedStrategy {
         int24 _ticksFromCurrent = int24(ticksFromCurrent);
         // Minimum tick to enter
         // we fix to the tick just above the current tick to ensure we provide single side
-        int24 _minTick = _currentTick + _tickSpacing;
+        int24 _minTick = _currentTick - (_tickSpacing * _ticksFromCurrent);
         // Maximum tick to enter
         int24 _maxTick = _currentTick +
             (_tickSpacing * (_ticksFromCurrent + 1));
@@ -461,5 +459,33 @@ contract Strategy is BaseTokenizedStrategy {
             type(uint128).max,
             type(uint128).max
         );
+    }
+
+    function _shouldClosePosition() internal returns (bool) {
+        uint256 _currentEpochStartedAt = epochStartedAt;
+
+        if (_currentEpochStartedAt == 0) {
+            return false;
+        }
+
+        if (_currentEpochStartedAt + epochDuration <= block.timestamp) {
+            // An epoch is running and it's time to close
+            return true;
+        }
+
+        IUniswapV3Pool _pool = IUniswapV3Pool(pool);
+        // The Epoch is running. Is it in danger?
+        // Get the current state of the pool
+        (uint160 sqrtPriceX96, int24 tick, , , , , ) = _pool.slot0();
+        // Space between ticks for this pool
+        int24 _tickSpacing = _pool.tickSpacing();
+        // Current tick must be referenced as a multiple of tickSpacing
+        int24 _currentTick = (tick / _tickSpacing) * _tickSpacing;
+        if (_currentTick >= maxTick) {
+            // The price crossed our range and we are out of range. Time to close the position
+            return true;
+        }
+
+        return false;
     }
 }
