@@ -24,10 +24,6 @@ dependencies:
     github: yearn/tokenized-strategy-periphery
     ref: master
     contracts_folder: src
-  - name: periphery
-    github: yearn/tokenized-strategy-periphery
-    ref: master
-    contracts_folder: src
   - name: v3-core
     github: 16slim/v3-core
     ref: 1.0.2-solc-0.8-simulate

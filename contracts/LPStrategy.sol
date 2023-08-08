@@ -27,7 +27,7 @@ import {TickMath} from "./libraries/TickMath.sol";
 
 // NOTE: To implement permissioned functions you can use the onlyManagement and onlyKeepers modifiers
 
-contract Strategy is BaseTokenizedStrategy {
+contract LPStrategy is BaseTokenizedStrategy {
     using SafeERC20 for ERC20;
 
     address public pool;
