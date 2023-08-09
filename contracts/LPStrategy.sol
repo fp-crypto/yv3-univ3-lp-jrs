@@ -9,26 +9,17 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IUniswapV3Pool} from "@uniswap/interfaces/IUniswapV3Pool.sol";
 
 import {UniswapHelperViews} from "./libraries/UniswapHelperViews.sol";
+
 // Liquidity calculations
 import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
 // Pool tick calculations
 import {TickMath} from "./libraries/TickMath.sol";
-
-/**
- * The `TokenizedStrategy` variable can be used to retrieve the strategies
- * specifc storage data your contract.
- *
- *       i.e. uint256 totalAssets = TokenizedStrategy.totalAssets()
- *
- * This can not be used for write functions. Any TokenizedStrategy
- * variables that need to be udpated post deployement will need to
- * come from an external call from the strategies specific `management`.
- */
-
-// NOTE: To implement permissioned functions you can use the onlyManagement and onlyKeepers modifiers
+import {SafeCast} from "./libraries/SafeCast.sol";
 
 contract LPStrategy is BaseTokenizedStrategy {
     using SafeERC20 for ERC20;
+    using SafeCast for uint256;
+    using SafeCast for int256;
 
     address public pool;
     address public otherPoolToken;
@@ -128,17 +119,13 @@ contract LPStrategy is BaseTokenizedStrategy {
             // There is no running epoch. Start one
             // NOTE: we save assets just before
             _totalAssets = ERC20(asset).balanceOf(address(this));
-            // TODO: request hedge (and substract payment from _totalAssets)
-            createLP();
+            openEpoch();
             return _totalAssets;
         }
 
         // require that it's the right time to close the epoch
         require(_shouldClosePosition(), "epoch-live"); // dev: epoch is running
-
-        // An epoch is running and it's time to close
-        (uint128 liquidity, , , , ) = _positionInfo();
-        burnLP(liquidity);
+        closeEpoch();
         _totalAssets = ERC20(asset).balanceOf(address(this));
     }
 
@@ -352,6 +339,27 @@ contract LPStrategy is BaseTokenizedStrategy {
         }
     }
 
+    function openEpoch() internal {
+        require(epochStartedAt == 0); // dev: no epoch must be running to open
+        createLP();
+        epochStartedAt = block.timestamp;
+    }
+
+    function closeEpoch() internal {
+        require(epochStartedAt != 0); // dev: epoch must be running to close
+
+        // An epoch is running and it's time to close
+        (uint128 liquidity, , , , ) = _positionInfo();
+        burnLP(liquidity);
+
+        uint256 _otherBalance = balanceOfOtherPoolToken();
+        if (_otherBalance > 0) {
+            swap(otherPoolToken, asset, _otherBalance, 0); // TODO: minOut non-zero?
+        }
+
+        epochStartedAt = 0;
+    }
+
     /*
      * @notice
      *  Function called by the uniswap pool when minting the LP position (providing liquidity),
@@ -522,5 +530,38 @@ contract LPStrategy is BaseTokenizedStrategy {
         }
 
         return false;
+    }
+
+    function swap(
+        address _tokenFrom,
+        address _tokenTo,
+        uint256 _amountIn,
+        uint256 _minOutAmount
+    ) internal returns (uint256) {
+        require(_tokenTo == asset || _tokenTo == otherPoolToken); // dev: must be a or b
+        require(_tokenFrom == asset || _tokenFrom == otherPoolToken); // dev: must be a or b
+        uint256 prevBalance = ERC20(_tokenTo).balanceOf(address(this));
+        // Use uni v3 pool to swap
+        // Order of swap
+        bool zeroForOne = _tokenFrom < _tokenTo;
+
+        // Use swap function of uni v3 pool, will use the implemented swap callback to
+        // receive the corresponding tokens
+        (int256 _amount0, int256 _amount1) = IUniswapV3Pool(pool).swap(
+            // recipient
+            address(this),
+            // Order of swap
+            zeroForOne,
+            // amountSpecified
+            _amountIn.toInt256(),
+            // Price limit
+            zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1,
+            // additonal calldata
+            ""
+        );
+        uint256 result = zeroForOne ? uint256(-_amount1) : uint256(-_amount0);
+        require(result >= _minOutAmount);
+        // Ensure amounts are returned in right order and sign (uni returns negative numbers)
+        return result;
     }
 }
