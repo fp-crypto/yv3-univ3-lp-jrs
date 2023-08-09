@@ -355,7 +355,7 @@ contract LPStrategy is BaseTokenizedStrategy {
     /*
      * @notice
      *  Function called by the uniswap pool when minting the LP position (providing liquidity),
-     * instead of approving and sending the tokens, uniV3 calls the callback imoplementation
+     * instead of approving and sending the tokens, uniV3 calls the callback implementation
      * on the caller contract
      * @param amount0Owed, amount of token0 to send
      * @param amount1Owed, amount of token1 to send
@@ -373,6 +373,41 @@ contract LPStrategy is BaseTokenizedStrategy {
         ERC20(_pool.token0()).safeTransfer(address(_pool), amount0Owed);
         ERC20(_pool.token1()).safeTransfer(address(_pool), amount1Owed);
     }
+
+    /*
+     * @notice
+     *  Function called by the uniswap pool when swapping,
+     * instead of approving and sending the tokens, uniV3 calls the callback implementation
+     * on the caller contract
+     * @param amount0Delta, amount of token0 to send (if any)
+     * @param amount1Delta, amount of token1 to send (if any)
+     * @param data, additional calldata
+     */
+    function uniswapV3SwapCallback(
+        int256 amount0Delta,
+        int256 amount1Delta,
+        bytes calldata data
+    ) external {
+        IUniswapV3Pool _pool = IUniswapV3Pool(pool);
+        // Only the pool can use this function
+        require(msg.sender == address(_pool)); // dev: callback only called by pool
+
+        uint256 amountIn;
+        address tokenIn;
+
+        // Send the required funds to the pool
+        if (amount0Delta > 0) {
+            amountIn = uint256(amount0Delta);
+            tokenIn = _pool.token0();
+        } else {
+            amountIn = uint256(amount1Delta);
+            tokenIn = _pool.token1();
+        }
+
+        ERC20(tokenIn).safeTransfer(address(_pool), amountIn);
+    }
+
+    /*  */
 
     function balanceOfAsset() public returns (uint256) {
         return ERC20(asset).balanceOf(address(this));

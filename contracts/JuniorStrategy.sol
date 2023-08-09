@@ -151,7 +151,7 @@ contract JuniorStrategy is BaseTokenizedStrategy, IAccountant {
         uint256 _gain,
         uint256 _loss
     ) external returns (uint256 _fees, uint256 _refunds) {
-        // TODO: callers == vault
+        require(msg.sender == vault); // dev: onlyVault can call
 
         if (seniorStrategy != _strategy) {
             // TODO: fallback accountant
