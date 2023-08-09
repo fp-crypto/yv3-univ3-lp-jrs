@@ -3,6 +3,7 @@ pragma solidity 0.8.18;
 
 import {BaseTokenizedStrategy} from "@tokenized-strategy/BaseTokenizedStrategy.sol";
 import {ITokenizedStrategy} from "@tokenized-strategy/interfaces/ITokenizedStrategy.sol";
+import {IVault} from "./interfaces/yearn/IVault.sol";
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -135,7 +136,13 @@ contract JuniorStrategy is BaseTokenizedStrategy, IAccountant {
         returns (uint256 _totalAssets)
     {
         ITokenizedStrategy(seniorStrategy).report();
-        // TODO: vault.report();
+        IVault _vault = IVault(vault);
+        _vault.process_report(seniorStrategy);
+        _vault.redeem(
+            _vault.balanceOf(address(this)),
+            address(this),
+            address(this)
+        );
         _totalAssets = ERC20(asset).balanceOf(address(this));
     }
 
@@ -253,7 +260,7 @@ contract JuniorStrategy is BaseTokenizedStrategy, IAccountant {
      * @param . The address that is withdrawing from the strategy.
      * @return . The available amount that can be withdrawn in terms of `asset`
      *
-    */
+     */
     function availableWithdrawLimit(
         address _owner
     ) public view override returns (uint256) {
@@ -262,7 +269,7 @@ contract JuniorStrategy is BaseTokenizedStrategy, IAccountant {
         uint256 _seniorDebt = _seniorStrategy.totalDebt();
         uint256 _juniorAssets = ERC20(asset).balanceOf(address(this));
 
-        uint256 _targetMaxCoverage = _seniorDebt * coverageRatioBps / MAX_BPS;
+        uint256 _targetMaxCoverage = (_seniorDebt * coverageRatioBps) / MAX_BPS;
 
         if (_targetMaxCoverage > _juniorAssets) return 0;
         return _juniorAssets - _targetMaxCoverage;
